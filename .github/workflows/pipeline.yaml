@@ -7,7 +7,10 @@ on:
       - closed
     branches:
       - Development
+      - development
       - production
+      - Production
+      - main
       - feat/github-workflow
       - 'release*'
     paths-ignore:
@@ -15,7 +18,6 @@ on:
       - 'docs'
       - '.dockerignore'
       - '.gitignore'
-      - 'Makefile'
 
 jobs:
   # application_code_test: (for application tests)
@@ -29,38 +31,42 @@ jobs:
     name: Re-tag Current Dev Image from latest
     uses: ./.github/workflows/re_tag_current_image.yaml
     needs: test_image_deployment
+    permissions:
+      id-token: write
+      contents: read
     with:
       AWS_ECR_REPOSITORY: ${{ github.event.pull_request.base.ref == 'production' && vars.AWS_PROD_ECR_REPOSITORY || vars.AWS_DEV_ECR_REPOSITORY }}
       AWS_REGION: ${{ github.event.pull_request.base.ref == 'production' && vars.AWS_PROD_REGION || vars.AWS_DEV_REGION }}
-      IMAGE_TAG_SUFFIX: ${{ vars.IMAGE_TAG_SUFFIX }}
+      IMAGE_TAG_SUFFIX: ${{ vars.IMAGE_TAG_SUFFIX || 'latest' }}
       AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-
   push_to_ecr:
     name: Push to Dev ecr registry
     needs: re_tag_current_latest
     uses: ./.github/workflows/push_image_to_ecr.yaml
+    permissions:
+      id-token: write
+      contents: read
     with:
-      IMAGE_TAG_SUFFIX: ${{ vars.IMAGE_TAG_SUFFIX }}
+      IMAGE_TAG_SUFFIX: ${{ vars.IMAGE_TAG_SUFFIX || 'latest' }}
       ENVIRONMENT: ${{ github.event.pull_request.base.ref }}
       AWS_ECR_REPOSITORY: ${{ github.event.pull_request.base.ref == 'production' && vars.AWS_PROD_ECR_REPOSITORY || vars.AWS_DEV_ECR_REPOSITORY }}
       AWS_REGION: ${{ github.event.pull_request.base.ref == 'production' && vars.AWS_PROD_REGION || vars.AWS_DEV_REGION }}
       AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
       AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
-      DOCKERFILE_PATH: ${{ vars.DOCKERFILE_PATH }}
-
-  deploy-to-eks:
-    uses: ./.github/workflows/eks-deploy.yaml
-    with:
-      cluster-name: ${{ vars.CLUSTER_NAME }}
-      region: ${{ vars.AWS_REGION }}
-      deployment-name: ${{ vars.DEPLOYMENT_NAME }}
-      namespace: ${{ vars.K8S_NAMESPACE }}
-      configmap-name: ${{ vars.CONFIGMAP_NAME }}
-      version-key: ${{ vars.VERSION_KEY }}
-      image-tag: ${{ github.sha }}${{ vars.IMAGE_TAG_SUFFIX }}
-      ecr-repository: ${{ vars.ECR_REPOSITORY }}
-      aws-role-arn: ${{ vars.AWS_ROLE_ARN }}
+      DOCKERFILE_PATH: ${{ vars.DOCKERFILE_PATH || '.' }}
+  # deploy-to-eks:
+  #   uses: ./.github/workflows/eks-deploy.yaml
+  #   with:
+  #     cluster-name: ${{ vars.CLUSTER_NAME }}
+  #     region: ${{ vars.AWS_REGION }}
+  #     deployment-name: ${{ vars.DEPLOYMENT_NAME }}
+  #     namespace: ${{ vars.K8S_NAMESPACE }}
+  #     configmap-name: ${{ vars.CONFIGMAP_NAME }}
+  #     version-key: ${{ vars.VERSION_KEY }}
+  #     image-tag: ${{ github.sha }}${{ vars.IMAGE_TAG_SUFFIX }}
+  #     ecr-repository: ${{ vars.ECR_REPOSITORY }}
+  #     aws-role-arn: ${{ vars.AWS_ROLE_ARN }}
 
   # notify-slack:
   #   name: Notify Slack
