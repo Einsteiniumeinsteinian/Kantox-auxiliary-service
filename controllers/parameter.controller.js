@@ -27,7 +27,7 @@ async function listParameters(req, res){
       })));
     }
    
-    console.log(`Successfully retrieved ${parameters.length} parameters`);
+    console.log(`Successfully retrieved ${parameters.length} parameters.`);
    
     res.json({
       success: true,
