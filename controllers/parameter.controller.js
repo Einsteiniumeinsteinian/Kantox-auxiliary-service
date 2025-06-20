@@ -9,6 +9,9 @@ async function listParameters(req, res){
   try {
     const parameterPath = `/${PROJECT_NAME}/`;
     const parameters = [];
+
+    console.log('Fetching Path Of',parameterPath)
+
     const command = new GetParametersByPathCommand({
       Path: parameterPath,
       Recursive: true, // Set to false if you only want direct children
