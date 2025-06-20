@@ -1,0 +1,262 @@
+# microservices-k8s-repo/.github/workflows/update-argocd-app.yaml
+name: Update ArgoCD Application
+
+on:
+  workflow_call:
+    inputs:
+      APP_NAME:
+        description: 'Name of the application to update (e.g., main-api, auxiliary-service)'
+        required: true
+        type: string
+      AWS_ECR_REPOSITORY:
+        required: true
+        type: string
+        description: 'AWS ECR Repository name (without registry URL)'
+      AWS_REGION:
+        required: true
+        type: string
+        description: 'AWS Region'
+      GIT_OPS_REPOSITORY:
+        required: true
+        type: string
+        description: 'GitOps Repo'
+      AWS_ROLE_ARN:
+        required: true
+        type: string
+        description: 'AWS IAM Role ARN for OIDC authentication'
+      ENVIRONMENT:
+        required: true
+        type: string
+        description: 'Deployment Environment'
+      IMAGE_TAG_SUFFIX:
+        required: false
+        type: string
+        description: 'Additional image tag to apply'
+        default: 'latest'
+    secrets:
+      APP_ID:
+        description: 'GitHub App ID'
+        required: true
+      PRIVATE_KEY:
+        description: 'GitHub App private key'
+        required: true
+
+jobs:
+  update-argocd:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+    - name: Configure AWS credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ inputs.AWS_ROLE_ARN }}
+        role-session-name: github-actions-ecr-deploy
+        aws-region: ${{ inputs.AWS_REGION }}
+
+    - name: Validate inputs
+      run: |
+        echo "🔍 Validating inputs..."
+        echo "App name: ${{ inputs.APP_NAME }}"
+        echo "Triggering repo: ${{ github.repository }}"
+        echo "Triggering SHA: ${{ github.sha }}"
+        echo "ECR Repository: ${{ inputs.AWS_ECR_REPOSITORY }}"
+        echo "GitOps Repository: ${{ inputs.GIT_OPS_REPOSITORY }}"
+        echo "AWS Region: ${{ inputs.AWS_REGION }}"
+  
+    - name: Determine latest version
+      id: determine-version
+      run: |
+        echo "🔍 Fetching tags for image with tag '${{ inputs.IMAGE_TAG_SUFFIX }}'..."
+
+        IMAGE_TAG="${{ inputs.IMAGE_TAG_SUFFIX }}"
+        ENV="${{ inputs.ENVIRONMENT }}"
+
+        # Get the digest of the image tagged with IMAGE_TAG
+        DIGEST=$(aws ecr describe-images \
+          --repository-name "${{ inputs.AWS_ECR_REPOSITORY }}" \
+          --region "${{ inputs.AWS_REGION }}" \
+          --query "imageDetails[?contains(imageTags, \`${IMAGE_TAG}\`)].imageDigest" \
+          --output text)
+
+        if [[ -z "$DIGEST" ]]; then
+          echo "❌ Could not find image with tag '$IMAGE_TAG'"
+          exit 1
+        fi
+
+        echo "✅ Found image digest for '$IMAGE_TAG': $DIGEST"
+
+        # Get all tags for that digest
+        TAGS=$(aws ecr describe-images \
+          --repository-name "${{ inputs.AWS_ECR_REPOSITORY }}" \
+          --region "${{ inputs.AWS_REGION }}" \
+          --query "imageDetails[?imageDigest=='$DIGEST'].imageTags[]" \
+          --output json | jq -r '.[]')
+
+        echo "📦 All tags for '$IMAGE_TAG' digest:"
+        echo "$TAGS"
+
+        # Find matching $ENV-<version> tag
+        MATCHING_TAG=$(echo "$TAGS" | grep -E "^${ENV}-v[0-9]+$" | sort -V | tail -n 1)
+
+        if [[ -z "$MATCHING_TAG" ]]; then
+          echo "❌ No matching tag found for environment '$ENV'"
+          exit 1
+        fi
+
+        # Extract version number
+        VERSION_NUMBER="${MATCHING_TAG#${ENV}-}"
+
+        echo "✅ Matched tag: $MATCHING_TAG"
+        echo "🔢 Extracted version number: $VERSION_NUMBER"
+
+        echo "VERSION=$MATCHING_TAG" >> $GITHUB_ENV
+        echo "VERSION_NUMBER=$VERSION_NUMBER" >> $GITHUB_ENV
+
+    - name: Extract repository name
+      id: extract-repo
+      run: |
+        REPO_NAME=$(echo "${{ inputs.GIT_OPS_REPOSITORY }}" | cut -d'/' -f2)
+        echo "REPO_NAME=$REPO_NAME" >> $GITHUB_OUTPUT
+
+    - name: Generate GitHub App token
+      id: app-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ secrets.APP_ID }}
+        private-key: ${{ secrets.PRIVATE_KEY }}
+        repositories: ${{ steps.extract-repo.outputs.REPO_NAME }}
+
+    - name: Checkout GitOps repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.GIT_OPS_REPOSITORY }}
+        token: ${{ steps.app-token.outputs.token }}
+        path: gitops-repo
+
+    - name: Validate ArgoCD application file exists
+      run: |
+        ls -la
+        ls -la gitops-repo
+        APP_FILE="gitops-repo/argocd/applications/${{ inputs.APP_NAME }}-application.yaml"
+        if [[ ! -f "$APP_FILE" ]]; then
+          echo "❌ Error: Application file not found: $APP_FILE"
+          echo "Available applications:"
+          ls -la gitops-repo/argocd/applications/ || echo "Applications directory not found"
+          exit 1
+        fi
+        echo "✅ Application file found: $APP_FILE"
+
+    - name: Update ArgoCD Application parameters
+      run: |
+        cd gitops-repo
+        APP_FILE="argocd/applications/${{ inputs.APP_NAME }}-application.yaml"
+        VERSION="${{ env.VERSION }}"
+        VERSION_NUMBER="${{ env.VERSION_NUMBER }}"
+
+        echo "🔧 Updating ArgoCD application parameters..."
+        echo "📊 Triggered by: ${{ github.repository }}@${{ github.sha }}"
+        echo "🏷️ Updating to version: $VERSION"
+        echo "🏷️ Updating to version: $VERSION_NUMBER"
+
+        # Create backup
+        cp "$APP_FILE" "$APP_FILE.backup"
+
+        echo "📋 Current file content before update:"
+        cat "$APP_FILE.backup"
+
+        # Update both image.tag and config.serviceVersion parameters
+        sed -i '/- name: app\.image\.tag/{n; s|value: ".*"|value: "'"$VERSION"'"|;}' "$APP_FILE"
+        sed -i '/name: config\.serviceVersion/,/value:/ s|value: ".*"|value: "'"$VERSION_NUMBER"'"|' "$APP_FILE"
+
+        # Verify changes were made
+        if cmp -s "$APP_FILE" "$APP_FILE.backup"; then
+          echo "⚠️ Warning: No changes detected in $APP_FILE"
+          echo "This might indicate the sed patterns didn't match"
+          echo ""
+          echo "🔍 Current parameters section:"
+          grep -A 10 "parameters:" "$APP_FILE" || echo "No parameters section found"
+        else
+          echo "✅ Successfully updated $APP_FILE"
+          echo ""
+          echo "🔍 Updated parameters section:"
+          grep -A 10 "parameters:" "$APP_FILE"
+        fi
+
+        # Clean up backup
+        rm "$APP_FILE.backup"
+
+    - name: Validate YAML syntax
+      run: |
+        cd gitops-repo                                     # 🔧 FIX: Work in correct directory
+        APP_FILE="argocd/applications/${{ inputs.APP_NAME }}-application.yaml"
+        
+        echo "🔍 Validating YAML syntax..."
+        if command -v yq &> /dev/null; then
+          yq eval '.' "$APP_FILE" > /dev/null
+          echo "✅ YAML syntax is valid"
+        else
+          echo "⚠️ yq not available, skipping YAML validation"
+        fi
+
+    - name: Show git diff
+      run: |
+        cd gitops-repo                                     # 🔧 FIX: Work in correct directory
+        echo "📋 Changes to be committed:"
+        git diff --color=always || echo "No changes detected"
+
+    - name: Commit and push changes
+      run: |
+        cd gitops-repo                                     # 🔧 FIX: Work in correct directory
+        APP_FILE="argocd/applications/${{ inputs.APP_NAME }}-application.yaml"
+        
+        # Configure git
+        git config --local user.email "github-actions@github.com"
+        git config --local user.name "GitHub Actions"
+        
+        # Stage the file
+        git add "$APP_FILE"
+        
+        # Check if there are changes to commit
+        if git diff --staged --quiet; then
+          echo "ℹ️ No changes to commit"
+          exit 0
+        fi
+        
+        # Create commit message
+        COMMIT_MSG="🚀 GitOps Deploy: ${{ inputs.APP_NAME }} ${{ env.VERSION }}
+
+        ✨ Updated parameters:
+        - image.tag: ${{ env.VERSION }}
+        - config.serviceVersion: ${{ env.VERSION }}
+        
+        📊 Deployment info:
+        - Triggered by: ${{ github.repository }}
+        - Source SHA: ${{ github.sha }}
+        - Workflow: ${{ github.workflow }}
+        - Run ID: ${{ github.run_id }}"
+        
+        # Commit and push
+        git commit -m "$COMMIT_MSG"
+        git push
+        
+        echo "✅ Successfully committed and pushed changes"
+        echo "🔄 ArgoCD will automatically sync the new version"
+
+    - name: Summary
+      run: |
+        echo "🎉 ArgoCD update completed!"
+        echo ""
+        echo "📋 Summary:"
+        echo "- Application: ${{ inputs.APP_NAME }}"
+        echo "- Version: ${{ env.VERSION }}"
+        echo "- File updated: argocd/applications/${{ inputs.APP_NAME }}-application.yaml"
+        echo ""
+        echo "🔄 Next steps:"
+        echo "1. ArgoCD will detect the Git change"
+        echo "2. ArgoCD will sync the application"
+        echo "3. New pods will be deployed with version ${{ env.VERSION }}"
+        echo "4. ConfigMap SERVICE_VERSION will be updated to ${{ env.VERSION }}"
