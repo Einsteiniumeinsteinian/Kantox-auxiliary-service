@@ -20,12 +20,9 @@ on:
       - '.gitignore'
 
 jobs:
-  # application_code_test: (for application tests)
-  #   name: Application Code Test
-  #   uses: ./.github/workflows/application_code_test.yaml
+
   test_image_deployment: 
     name: Test Image Deployment
-    # needs: application_code_test
     uses: ./.github/workflows/test_image_deployment.yaml
   re_tag_current_latest:
     name: Re-tag Current Dev Image from latest
